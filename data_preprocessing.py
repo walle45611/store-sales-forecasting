@@ -5,8 +5,8 @@ from sklearn.preprocessing import LabelEncoder
 
 # 1. 路徑設定
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-RAW_DIR = os.path.join(BASE_DIR, "data", "init")  # 原始 CSV 資料夾
-OUTPUT_DIR = os.path.join(BASE_DIR, "data", "processed")  # 處理後結果存放
+RAW_DIR = os.path.join(BASE_DIR, "data", "init")
+OUTPUT_DIR = os.path.join(BASE_DIR, "data", "processed")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # 2. 讀取原始 CSV
@@ -22,7 +22,7 @@ stores = pd.read_csv(os.path.join(RAW_DIR, "stores.csv"))
 # 3. 補齊油價缺失
 oil["dcoilwtico"] = oil["dcoilwtico"].ffill().bfill()
 
-# 4. 節日處理：去除 Transfer，並標記 is_holiday
+# 4. 節日處理：去除 Transfer
 holidays = holidays[holidays["type"] != "Transfer"].copy()
 holidays["is_holiday"] = 1
 holidays = holidays[["date", "is_holiday"]]
@@ -58,28 +58,76 @@ def add_time_features(df):
 for df in (train, test):
     add_time_features(df)
 
-# 8. 類別欄位編碼
-le_family = LabelEncoder().fit(train["family"])
-le_type = LabelEncoder().fit(stores["type"])
-le_cluster = LabelEncoder().fit(stores["cluster"])
-
-for df in (train, test):
-    df["family_enc"] = le_family.transform(df["family"])
-    df["type_enc"] = le_type.transform(df["type"])
-    df["cluster_enc"] = le_cluster.transform(df["cluster"])
-
-# 9. 轉換目標變數 (train)
+# 8. 計算 sales_log 與 lag 特徵
 train["sales_log"] = np.log1p(train["sales"])
+print("Adding lagged sales features...")
+full_df = pd.concat([train, test], ignore_index=True)
+full_df = full_df.sort_values(by=["store_nbr", "family", "date"])
 
-# 10. 輸出結果 (Parquet 格式)
-train.to_parquet(os.path.join(OUTPUT_DIR, "train_basic.parquet"), index=False)
-test.to_parquet(os.path.join(OUTPUT_DIR, "test_basic.parquet"), index=False)
+for lag in [1, 7, 14, 28]:
+    full_df[f"sales_lag_{lag}"] = full_df.groupby(["store_nbr", "family"])[
+        "sales_log"
+    ].shift(lag)
+
+# 9. 類別編碼
+le_family = LabelEncoder().fit(full_df["family"])
+le_type = LabelEncoder().fit(full_df["type"])
+le_cluster = LabelEncoder().fit(full_df["cluster"])
+
+full_df["family_enc"] = le_family.transform(full_df["family"])
+full_df["type_enc"] = le_type.transform(full_df["type"])
+full_df["cluster_enc"] = le_cluster.transform(full_df["cluster"])
+
+# 10. 分離 train/test 並重置欄位順序
+train_output = full_df[full_df["id"].isin(train["id"])].copy()
+test_output = full_df[full_df["id"].isin(test["id"])].copy()
+
+COMMON_FEATURES = [
+    "id",
+    "date",
+    "store_nbr",
+    "family",
+    "onpromotion",
+    "dcoilwtico",
+    "transactions",
+    "is_holiday",
+    "type",
+    "cluster",
+    "city",
+    "state",
+    "dow",
+    "month",
+    "year",
+    "weekofyear",
+    "is_weekend",
+    "family_enc",
+    "type_enc",
+    "cluster_enc",
+    "sales_lag_1",
+    "sales_lag_7",
+    "sales_lag_14",
+    "sales_lag_28",
+]
+
+train_output = train_output[COMMON_FEATURES + ["sales", "sales_log"]]
+test_output = test_output[COMMON_FEATURES]
+
+# 11. 輸出 parquet
+train_output.to_parquet(os.path.join(OUTPUT_DIR, "train_basic.parquet"), index=False)
+test_output.to_parquet(os.path.join(OUTPUT_DIR, "test_basic.parquet"), index=False)
 
 print("Preprocessing complete! Files saved in:", OUTPUT_DIR)
+print(f"Train shape: {train_output.shape}")
+print(f"Test shape:  {test_output.shape}\n")
 
-# 11. 印出最後幾筆做確認
-print("\n===== Train 最後 5 筆 =====")
-print(train.tail())
+MODEL_FEATURES_FOR_TRAIN = COMMON_FEATURES[4:]  # 去掉id,date,store_nbr,family
+print(f"===== 模型特徵 ({len(MODEL_FEATURES_FOR_TRAIN)}個) =====")
+for feature in MODEL_FEATURES_FOR_TRAIN:
+    print(f"- {feature}")
 
-print("\n===== Test 最後 5 筆 =====")
-print(test.tail())
+# 12. 顯示前五筆資料
+print("\n===== Train 前五筆 =====")
+print(train_output.head())
+
+print("\n===== Test 前五筆 =====")
+print(test_output.head())
